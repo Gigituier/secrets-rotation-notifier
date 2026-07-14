@@ -26,42 +26,25 @@ def check_secrets_in_region(region: str) -> List[Dict]:
                 if 'RotationEnabled' not in secret or not secret['RotationEnabled']:
                     continue
                 
+                # Skip replica secrets — rotation is managed in the primary region
+                primary_region = secret.get('PrimaryRegion')
+                if primary_region and primary_region != region:
+                    continue
+                
                 secret_name = secret['Name']
-                try:
-                    details = sm.describe_secret(SecretId=secret_name)
-                    
-                    # Skip replica secrets — rotation is managed in the primary region
-                    primary_region = details.get('PrimaryRegion')
-                    if primary_region and primary_region != region:
-                        continue
-                    
-                    now = datetime.now(timezone.utc)
-                    rotation_days = details.get('RotationRules', {}).get('AutomaticallyAfterDays')
-                    last_rotated = details.get('LastRotatedDate')
-                    next_rotation = details.get('NextRotationDate')
-                    
-                    # Check for failed rotation
-                    if last_rotated is None:
-                        # Rotation has never succeeded — but only flag as FAILED
-                        # if the first rotation was already due (based on creation date)
-                        created_date = details.get('CreatedDate')
-                        days_since_created = (now - created_date).days if created_date else 0
-                        if rotation_days and days_since_created > rotation_days + 1:
-                            days_overdue = days_since_created - rotation_days - 1
-                            # Alert on first day overdue, then weekly
-                            if days_overdue <= 1 or days_overdue % 7 == 0:
-                                secrets_to_notify.append({
-                                    'name': secret_name,
-                                    'arn': secret['ARN'],
-                                    'region': region,
-                                    'next_rotation': next_rotation,
-                                    'last_rotated': None,
-                                    'days_overdue': days_overdue,
-                                    'status': 'FAILED'
-                                })
-                    elif rotation_days and (now - last_rotated).days > rotation_days + 1:
-                        # Last successful rotation is older than the rotation interval
-                        days_overdue = (now - last_rotated).days - rotation_days - 1
+                now = datetime.now(timezone.utc)
+                rotation_days = secret.get('RotationRules', {}).get('AutomaticallyAfterDays')
+                last_rotated = secret.get('LastRotatedDate')
+                next_rotation = secret.get('NextRotationDate')
+                
+                # Check for failed rotation
+                if last_rotated is None:
+                    # Rotation has never succeeded — but only flag as FAILED
+                    # if the first rotation was already due (based on creation date)
+                    created_date = secret.get('CreatedDate')
+                    days_since_created = (now - created_date).days if created_date else 0
+                    if rotation_days and days_since_created > rotation_days + 1:
+                        days_overdue = days_since_created - rotation_days - 1
                         # Alert on first day overdue, then weekly
                         if days_overdue <= 1 or days_overdue % 7 == 0:
                             secrets_to_notify.append({
@@ -69,26 +52,36 @@ def check_secrets_in_region(region: str) -> List[Dict]:
                                 'arn': secret['ARN'],
                                 'region': region,
                                 'next_rotation': next_rotation,
-                                'last_rotated': last_rotated,
+                                'last_rotated': None,
                                 'days_overdue': days_overdue,
                                 'status': 'FAILED'
-                        })
-                    # Check for upcoming rotation
-                    elif next_rotation:
-                        days_until = (next_rotation - now).days
-                        if days_until == THRESHOLD_DAYS:
-                            secrets_to_notify.append({
-                                'name': secret_name,
-                                'arn': secret['ARN'],
-                                'region': region,
-                                'next_rotation': next_rotation,
-                                'days_until': days_until,
-                                'status': 'UPCOMING'
                             })
-                
-                except Exception as e:
-                    print(f"Error checking secret {secret_name} in {region}: {str(e)}")
-                    continue
+                elif rotation_days and (now - last_rotated).days > rotation_days + 1:
+                    # Last successful rotation is older than the rotation interval
+                    days_overdue = (now - last_rotated).days - rotation_days - 1
+                    # Alert on first day overdue, then weekly
+                    if days_overdue <= 1 or days_overdue % 7 == 0:
+                        secrets_to_notify.append({
+                            'name': secret_name,
+                            'arn': secret['ARN'],
+                            'region': region,
+                            'next_rotation': next_rotation,
+                            'last_rotated': last_rotated,
+                            'days_overdue': days_overdue,
+                            'status': 'FAILED'
+                        })
+                # Check for upcoming rotation
+                elif next_rotation:
+                    days_until = (next_rotation - now).days
+                    if days_until == THRESHOLD_DAYS:
+                        secrets_to_notify.append({
+                            'name': secret_name,
+                            'arn': secret['ARN'],
+                            'region': region,
+                            'next_rotation': next_rotation,
+                            'days_until': days_until,
+                            'status': 'UPCOMING'
+                        })
     
     except Exception as e:
         print(f"Error listing secrets in {region}: {str(e)}")
